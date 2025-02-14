@@ -290,7 +290,7 @@ async def chat_completions(request: ChatCompletionRequest):
                     {"role": "User", "content": processed_content, "images": images}
                 )
 
-        logger.info(f"conversation: {json.dumps(conversation, ensure_ascii=False)}")
+        logger.info(f"conversation: {conversation}")
 
         inputs = vl_chat_processor(
             conversations=conversation, images=images, force_batchify=True
