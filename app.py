@@ -268,15 +268,15 @@ async def chat_completions(request: ChatCompletionRequest):
     try:
         request_start_time = time.time()
         logger.info(f"Received chat completion request for model: {request.model}")
-        logger.info(f"Request content: {request.json()}")
+        logger.info(f"Request content: {request.model_dump_json()}")
 
         conversation = []
+        images = []
         for msg in request.messages:
             if isinstance(msg.content, str):
                 conversation.append({"role": msg.role, "content": msg.content})
             else:
                 processed_content = ""
-                images = []
                 for content_item in msg.content:
                     if content_item.type == "text":
                         processed_content = f"<image_placeholder>\n{content_item.text}"
@@ -289,6 +289,8 @@ async def chat_completions(request: ChatCompletionRequest):
                 conversation.append(
                     {"role": "User", "content": processed_content, "images": images}
                 )
+
+        logger.info(f"conversation: {json.dumps(conversation, ensure_ascii=False)}")
 
         inputs = vl_chat_processor(
             conversations=conversation, images=images, force_batchify=True
