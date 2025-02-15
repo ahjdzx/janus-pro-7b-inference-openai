@@ -366,11 +366,10 @@ def process_messages(
 
 def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
     """Generate response stream for chat completion"""
-    generated_ids = []
     past_key_values = None
     i = 0
     while i < request.max_tokens:
-        max_new = min(512, request.max_tokens - i)
+        max_new = min(128, request.max_tokens - i)
         if i == 0:
             outputs = vl_gpt.language_model.generate(
                 inputs_embeds=inputs_embeds,
@@ -401,59 +400,45 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
 
         if hasattr(outputs, "past_key_values"):
             past_key_values = outputs.past_key_values
-            new_tokens = outputs[0][-max_new:]
-        else:
-            new_tokens = outputs[-max_new:]
 
-        for new_token in new_tokens:
-            new_token = new_token.unsqueeze(0)
-            generated_ids.append(new_token)
+        response = tokenizer.decode(
+            outputs[0].cpu().tolist(), skip_special_tokens=True
+        )
+        # 调试信息
+        logger.info(f"Generated token: {outputs.shape} {outputs}")
+        logger.info(f"Decoded response: {response}")
+        if (
+            request.response_format
+            and request.response_format.get("type") == "json_object"
+        ):
             try:
-                response = tokenizer.decode(
-                    torch.cat(generated_ids, dim=0).cpu().tolist()[0],
-                    skip_special_tokens=True,
+                if response.startswith("```"):
+                    response = "\n".join(response.split("\n")[1:-1])
+                if response.startswith("json"):
+                    response = response[4:].lstrip()
+                content = json.loads(response)
+                response = json.dumps(content)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parsing error: {str(e)}")
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid JSON response: {str(e)}"
                 )
-            except RuntimeError as e:
-                logger.error(f"Error concatenating tensors: {str(e)}")
-                raise HTTPException(status_code=500, detail="Error generating response")
-
-            # 调试信息
-            logger.info(f"Generated token: {new_token.shape} {new_token}")
-            logger.info(f"Decoded response: {response}")
-
-            if (
-                request.response_format
-                and request.response_format.get("type") == "json_object"
-            ):
-                try:
-                    if response.startswith("```"):
-                        response = "\n".join(response.split("\n")[1:-1])
-                    if response.startswith("json"):
-                        response = response[4:].lstrip()
-                    content = json.loads(response)
-                    response = json.dumps(content)
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON parsing error: {str(e)}")
-                    raise HTTPException(
-                        status_code=400, detail=f"Invalid JSON response: {str(e)}"
-                    )
-
-            event = {
-                "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": request.model,
-                "choices": [
-                    {"index": 0, "delta": {"content": response}, "finish_reason": None}
-                ],
-            }
-            yield f"data: {json.dumps(event)}\n\n"
-
-            # 获取 new_token 的最后一个值并与 tokenizer.eos_token_id 比较
-            last_token = new_token[0, -1].item()
-            logger.info(f"Last token: {last_token}, EOS token: {tokenizer.eos_token_id}")
-            if last_token == tokenizer.eos_token_id:
-                break
+        event = {
+            "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "object": "chat.completion.chunk",
+            "created": int(datetime.now().timestamp()),
+            "model": request.model,
+            "choices": [
+                {"index": 0, "delta": {"content": response}, "finish_reason": None}
+            ],
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+        
+        # 获取 new_token 的最后一个值并与 tokenizer.eos_token_id 比较
+        last_token = outputs[0, -1].item()
+        logger.info(f"Last token: {last_token}, EOS token: {tokenizer.eos_token_id}")
+        # if last_token == tokenizer.eos_token_id:
+        #     break
 
         i += max_new
 
