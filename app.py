@@ -13,6 +13,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, field_validator
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -300,13 +301,100 @@ async def chat_completions(request: ChatCompletionRequest):
         )
 
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**inputs)
+
+        def generate_stream():
+            generated_ids = []
+            for i in range(request.max_tokens):
+                if i == 0:
+                    outputs = vl_gpt.language_model.generate(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=inputs.attention_mask,
+                        pad_token_id=tokenizer.eos_token_id,
+                        bos_token_id=tokenizer.bos_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        max_new_tokens=1,
+                        do_sample=False if request.temperature == 0 else True,
+                        use_cache=True,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                    )
+                else:
+                    outputs = vl_gpt.language_model.generate(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=inputs.attention_mask,
+                        pad_token_id=tokenizer.eos_token_id,
+                        bos_token_id=tokenizer.bos_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        max_new_tokens=1,
+                        do_sample=False if request.temperature == 0 else True,
+                        use_cache=True,
+                        temperature=request.temperature,
+                        top_p=request.top_p,
+                        past_key_values=outputs.past_key_values,
+                    )
+
+                new_token = outputs[0][-1].unsqueeze(0)
+                generated_ids.append(new_token)
+                response = tokenizer.decode(
+                    torch.cat(generated_ids, dim=1).cpu().tolist()[0],
+                    skip_special_tokens=True,
+                )
+
+                if (
+                    request.response_format
+                    and request.response_format.get("type") == "json_object"
+                ):
+                    try:
+                        if response.startswith("```"):
+                            response = "\n".join(response.split("\n")[1:-1])
+                        if response.startswith("json"):
+                            response = response[4:].lstrip()
+                        content = json.loads(response)
+                        response = json.dumps(content)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON parsing error: {str(e)}")
+                        raise HTTPException(
+                            status_code=400, detail=f"Invalid JSON response: {str(e)}"
+                        )
+
+                event = {
+                    "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": response},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+
+                if new_token.item() == tokenizer.eos_token_id:
+                    break
+
+            # 发送结束事件
+            event = {
+                "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "object": "chat.completion.chunk",
+                "created": int(datetime.now().timestamp()),
+                "model": request.model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(event)}\n\n"
+
+        if request.stream:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
         generated_ids = vl_gpt.language_model.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=inputs.attention_mask,
             pad_token_id=tokenizer.eos_token_id,
             bos_token_id=tokenizer.bos_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            max_new_tokens=512,
+            max_new_tokens=request.max_tokens,
             do_sample=False if request.temperature == 0 else True,
             use_cache=True,
             temperature=request.temperature,
@@ -377,9 +465,9 @@ async def health_check():
         "model_loaded": vl_gpt is not None and vl_chat_processor is not None,
         "device": str(cuda_device),
         "cuda_available": torch.cuda.is_available(),
-        "cuda_device_count": torch.cuda.device_count()
-        if torch.cuda.is_available()
-        else 0,
+        "cuda_device_count": (
+            torch.cuda.device_count() if torch.cuda.is_available() else 0
+        ),
         "timestamp": datetime.now().isoformat(),
     }
 
