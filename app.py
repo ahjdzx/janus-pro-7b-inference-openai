@@ -292,7 +292,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
         if request.stream:
             return StreamingResponse(
-                generate_stream(model, response),
+                generate_stream(request.model, response),
                 media_type="text/event-stream",
             )
 
