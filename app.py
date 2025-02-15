@@ -414,7 +414,7 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
             )
             
             # 调试信息
-            logger.info(f"Generated token: {new_token.item()}")
+            logger.info(f"Generated token: {new_token.shape} {new_token}")
             logger.info(f"Decoded response: {response}")
 
             if (
@@ -445,7 +445,8 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
             }
             yield f"data: {json.dumps(event)}\n\n"
 
-            if new_token.item() == tokenizer.eos_token_id:
+            logger.info(f"tokenizer.eos_token_id: {tokenizer.eos_token_id}")
+            if new_token == tokenizer.eos_token_id:
                 break
 
         i += max_new
