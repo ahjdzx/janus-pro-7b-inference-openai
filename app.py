@@ -361,6 +361,7 @@ def process_messages(messages: List[ChatMessage]) -> Tuple[List[Dict[str, Any]],
 def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
     """Generate response stream for chat completion"""
     generated_ids = []
+    past_key_values = None
     for i in range(request.max_tokens):
         if i == 0:
             outputs = vl_gpt.language_model.generate(
@@ -387,10 +388,15 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
                 use_cache=True,
                 temperature=request.temperature,
                 top_p=request.top_p,
-                past_key_values=outputs.past_key_values,
+                past_key_values=past_key_values,
             )
 
-        new_token = outputs[0][-1].unsqueeze(0)
+        if hasattr(outputs, 'past_key_values'):
+            past_key_values = outputs.past_key_values
+            new_token = outputs[0][-1].unsqueeze(0)
+        else:
+            new_token = outputs[-1].unsqueeze(0)
+
         generated_ids.append(new_token)
         if len(generated_ids) == 1:
             response = tokenizer.decode(
