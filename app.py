@@ -437,8 +437,8 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
         # 获取 new_token 的最后一个值并与 tokenizer.eos_token_id 比较
         last_token = outputs[0, -1].item()
         logger.info(f"Last token: {last_token}, EOS token: {tokenizer.eos_token_id}")
-        # if last_token == tokenizer.eos_token_id:
-        #     break
+        if last_token == tokenizer.eos_token_id:
+            break
 
         i += max_new
 
