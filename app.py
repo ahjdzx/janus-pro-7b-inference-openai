@@ -5,7 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 import GPUtil
 import psutil
@@ -271,25 +271,7 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Received chat completion request for model: {request.model}")
         logger.info(f"Request content: {request.model_dump_json()}")
 
-        conversation = []
-        images = []
-        for msg in request.messages:
-            if isinstance(msg.content, str):
-                conversation.append({"role": msg.role, "content": msg.content})
-            else:
-                processed_content = ""
-                for content_item in msg.content:
-                    if content_item.type == "text":
-                        processed_content = f"<image_placeholder>\n{content_item.text}"
-                    elif content_item.type == "image_url":
-                        if "url" in content_item.image_url:
-                            if content_item.image_url["url"].startswith("data:image"):
-                                images.append(
-                                    process_base64_image(content_item.image_url["url"])
-                                )
-                conversation.append(
-                    {"role": "User", "content": processed_content, "images": images}
-                )
+        conversation, images = process_messages(request.messages)
 
         logger.info(f"conversation: {conversation}")
 
@@ -302,130 +284,10 @@ async def chat_completions(request: ChatCompletionRequest):
 
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**inputs)
 
-        def generate_stream():
-            generated_ids = []
-            for i in range(request.max_tokens):
-                if i == 0:
-                    outputs = vl_gpt.language_model.generate(
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=inputs.attention_mask,
-                        pad_token_id=tokenizer.eos_token_id,
-                        bos_token_id=tokenizer.bos_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        max_new_tokens=1,
-                        do_sample=False if request.temperature == 0 else True,
-                        use_cache=True,
-                        temperature=request.temperature,
-                        top_p=request.top_p,
-                    )
-                else:
-                    outputs = vl_gpt.language_model.generate(
-                        inputs_embeds=inputs_embeds,
-                        attention_mask=inputs.attention_mask,
-                        pad_token_id=tokenizer.eos_token_id,
-                        bos_token_id=tokenizer.bos_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        max_new_tokens=1,
-                        do_sample=False if request.temperature == 0 else True,
-                        use_cache=True,
-                        temperature=request.temperature,
-                        top_p=request.top_p,
-                        past_key_values=outputs.past_key_values,
-                    )
-
-                new_token = outputs[0][-1].unsqueeze(0)
-                generated_ids.append(new_token)
-                response = tokenizer.decode(
-                    torch.cat(generated_ids, dim=1).cpu().tolist()[0],
-                    skip_special_tokens=True,
-                )
-
-                if (
-                    request.response_format
-                    and request.response_format.get("type") == "json_object"
-                ):
-                    try:
-                        if response.startswith("```"):
-                            response = "\n".join(response.split("\n")[1:-1])
-                        if response.startswith("json"):
-                            response = response[4:].lstrip()
-                        content = json.loads(response)
-                        response = json.dumps(content)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"JSON parsing error: {str(e)}")
-                        raise HTTPException(
-                            status_code=400, detail=f"Invalid JSON response: {str(e)}"
-                        )
-
-                event = {
-                    "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    "object": "chat.completion.chunk",
-                    "created": int(datetime.now().timestamp()),
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": response},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(event)}\n\n"
-
-                if new_token.item() == tokenizer.eos_token_id:
-                    break
-
-            # 发送结束事件
-            event = {
-                "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                "object": "chat.completion.chunk",
-                "created": int(datetime.now().timestamp()),
-                "model": request.model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-            yield f"data: {json.dumps(event)}\n\n"
-
         if request.stream:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return StreamingResponse(generate_stream(inputs, inputs_embeds, request), media_type="text/event-stream")
 
-        generated_ids = vl_gpt.language_model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=inputs.attention_mask,
-            pad_token_id=tokenizer.eos_token_id,
-            bos_token_id=tokenizer.bos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            max_new_tokens=request.max_tokens,
-            do_sample=False if request.temperature == 0 else True,
-            use_cache=True,
-            temperature=request.temperature,
-            top_p=request.top_p,
-        )
-
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-
-        response = tokenizer.decode(
-            generated_ids[0].cpu().tolist(), skip_special_tokens=True
-        )
-
-        if (
-            request.response_format
-            and request.response_format.get("type") == "json_object"
-        ):
-            try:
-                if response.startswith("```"):
-                    response = "\n".join(response.split("\n")[1:-1])
-                if response.startswith("json"):
-                    response = response[4:].lstrip()
-                content = json.loads(response)
-                response = json.dumps(content)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing error: {str(e)}")
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid JSON response: {str(e)}"
-                )
+        response, generated_ids_trimmed = generate_response(inputs, inputs_embeds, request)
 
         total_time = time.time() - request_start_time
         logger.info(f"Request completed in {total_time:.2f} seconds")
@@ -470,6 +332,159 @@ async def health_check():
         ),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+def process_messages(messages: List[ChatMessage]) -> Tuple[List[Dict[str, Any]], List[Image.Image]]:
+    """Process chat messages and extract conversation and images"""
+    conversation = []
+    images = []
+    for msg in messages:
+        if isinstance(msg.content, str):
+            conversation.append({"role": msg.role, "content": msg.content})
+        else:
+            processed_content = ""
+            for content_item in msg.content:
+                if content_item.type == "text":
+                    processed_content = f"<image_placeholder>\n{content_item.text}"
+                elif content_item.type == "image_url":
+                    if "url" in content_item.image_url:
+                        if content_item.image_url["url"].startswith("data:image"):
+                            images.append(
+                                process_base64_image(content_item.image_url["url"])
+                            )
+            conversation.append(
+                {"role": "User", "content": processed_content, "images": images}
+            )
+    return conversation, images
+
+
+def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
+    """Generate response stream for chat completion"""
+    generated_ids = []
+    for i in range(request.max_tokens):
+        if i == 0:
+            outputs = vl_gpt.language_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=inputs.attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=1,
+                do_sample=False if request.temperature == 0 else True,
+                use_cache=True,
+                temperature=request.temperature,
+                top_p=request.top_p,
+            )
+        else:
+            outputs = vl_gpt.language_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=inputs.attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=1,
+                do_sample=False if request.temperature == 0 else True,
+                use_cache=True,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                past_key_values=outputs.past_key_values,
+            )
+
+        new_token = outputs[0][-1].unsqueeze(0)
+        generated_ids.append(new_token)
+        response = tokenizer.decode(
+            torch.cat(generated_ids, dim=1).cpu().tolist()[0],
+            skip_special_tokens=True,
+        )
+
+        if (
+            request.response_format
+            and request.response_format.get("type") == "json_object"
+        ):
+            try:
+                if response.startswith("```"):
+                    response = "\n".join(response.split("\n")[1:-1])
+                if response.startswith("json"):
+                    response = response[4:].lstrip()
+                content = json.loads(response)
+                response = json.dumps(content)
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON parsing error: {str(e)}")
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid JSON response: {str(e)}"
+                )
+
+        event = {
+            "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "object": "chat.completion.chunk",
+            "created": int(datetime.now().timestamp()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": response},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+        if new_token.item() == tokenizer.eos_token_id:
+            break
+
+    # 发送结束事件
+    event = {
+        "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "object": "chat.completion.chunk",
+        "created": int(datetime.now().timestamp()),
+        "model": request.model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(event)}\n\n"
+
+
+def generate_response(inputs, inputs_embeds, request: ChatCompletionRequest) -> Tuple[str, List[torch.Tensor]]:
+    """Generate response for chat completion"""
+    generated_ids = vl_gpt.language_model.generate(
+        inputs_embeds=inputs_embeds,
+        attention_mask=inputs.attention_mask,
+        pad_token_id=tokenizer.eos_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=request.max_tokens,
+        do_sample=False if request.temperature == 0 else True,
+        use_cache=True,
+        temperature=request.temperature,
+        top_p=request.top_p,
+    )
+
+    generated_ids_trimmed = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+
+    response = tokenizer.decode(
+        generated_ids[0].cpu().tolist(), skip_special_tokens=True
+    )
+
+    if (
+        request.response_format
+        and request.response_format.get("type") == "json_object"
+    ):
+        try:
+            if response.startswith("```"):
+                response = "\n".join(response.split("\n")[1:-1])
+            if response.startswith("json"):
+                response = response[4:].lstrip()
+            content = json.loads(response)
+            response = json.dumps(content)
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {str(e)}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid JSON response: {str(e)}"
+            )
+
+    return response, generated_ids_trimmed
 
 
 if __name__ == "__main__":
