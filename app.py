@@ -283,18 +283,18 @@ async def chat_completions(request: ChatCompletionRequest):
         )
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**inputs)
 
-        if request.stream:
-            return StreamingResponse(
-                generate_stream(inputs, inputs_embeds, request),
-                media_type="text/event-stream",
-            )
-
         response, generated_ids_trimmed = generate_response(
             inputs, inputs_embeds, request
         )
 
         total_time = time.time() - request_start_time
         logger.info(f"Request completed in {total_time:.2f} seconds")
+
+        if request.stream:
+            return StreamingResponse(
+                generate_stream(response),
+                media_type="text/event-stream",
+            )
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -364,93 +364,45 @@ def process_messages(
     return conversation, images
 
 
-def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
+def generate_stream(request: ChatCompletionRequest, response: str):
     """Generate response stream for chat completion"""
-    past_key_values = None
-    i = 0
-    while i < request.max_tokens:
-        max_new = min(128, request.max_tokens - i)
-        if i == 0:
-            outputs = vl_gpt.language_model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=inputs.attention_mask,
-                pad_token_id=tokenizer.eos_token_id,
-                bos_token_id=tokenizer.bos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                max_new_tokens=max_new,
-                do_sample=False if request.temperature == 0 else True,
-                use_cache=True,
-                temperature=request.temperature,
-                top_p=request.top_p,
-            )
-        else:
-            outputs = vl_gpt.language_model.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=inputs.attention_mask,
-                pad_token_id=tokenizer.eos_token_id,
-                bos_token_id=tokenizer.bos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                max_new_tokens=max_new,
-                do_sample=False if request.temperature == 0 else True,
-                use_cache=True,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                past_key_values=past_key_values,
-            )
-
-        if hasattr(outputs, "past_key_values"):
-            past_key_values = outputs.past_key_values
-
-        response = tokenizer.decode(
-            outputs[0].cpu().tolist(), skip_special_tokens=True
-        )
-        # 调试信息
-        logger.info(f"Generated token: {outputs.shape} {outputs}")
-        logger.info(f"Decoded response: {response}")
-        if (
-            request.response_format
-            and request.response_format.get("type") == "json_object"
-        ):
-            try:
-                if response.startswith("```"):
-                    response = "\n".join(response.split("\n")[1:-1])
-                if response.startswith("json"):
-                    response = response[4:].lstrip()
-                content = json.loads(response)
-                response = json.dumps(content)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing error: {str(e)}")
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid JSON response: {str(e)}"
-                )
-        event = {
+    # 模拟流式输出：将 response 拆分为 token（或词），逐步发送
+    tokens = response.split()  # 简单按空格拆分
+    for token in tokens:
+        chunk = {
             "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "object": "chat.completion.chunk",
             "created": int(datetime.now().timestamp()),
             "model": request.model,
             "choices": [
-                {"index": 0, "delta": {"content": response}, "finish_reason": None}
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": token + " "},
+                    "finish_reason": None,
+                }
             ],
         }
-        yield f"data: {json.dumps(event)}\n\n"
-        
-        # 获取 new_token 的最后一个值并与 tokenizer.eos_token_id 比较
-        last_token = outputs[0, -1].item()
-        logger.info(f"Last token: {last_token}, EOS token: {tokenizer.eos_token_id}")
-        if last_token == tokenizer.eos_token_id:
-            break
-
-        i += max_new
+        # 每个数据块前加上 "data: " 并以 "\n\n" 结尾，符合 SSE 格式
+        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+        # time.sleep(0.01)  # 模拟延迟，可根据需要调整
 
     # 发送结束事件
-    event = {
+    chunk = {
         "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "object": "chat.completion.chunk",
         "created": int(datetime.now().timestamp()),
         "model": request.model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": "stop",
+            }
+        ],
     }
-    yield f"data: {json.dumps(event)}\n\n"
+    yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+    # 最后发送 DONE 信号
+    yield "data: [DONE]\n\n"
 
 
 def generate_response(
