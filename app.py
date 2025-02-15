@@ -408,11 +408,15 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
         for new_token in new_tokens:
             new_token = new_token.unsqueeze(0)
             generated_ids.append(new_token)
-            response = tokenizer.decode(
-                torch.cat(generated_ids, dim=0).cpu().tolist()[0],
-                skip_special_tokens=True,
-            )
-            
+            try:
+                response = tokenizer.decode(
+                    torch.cat(generated_ids, dim=0).cpu().tolist()[0],
+                    skip_special_tokens=True,
+                )
+            except RuntimeError as e:
+                logger.error(f"Error concatenating tensors: {str(e)}")
+                raise HTTPException(status_code=500, detail="Error generating response")
+
             # 调试信息
             logger.info(f"Generated token: {new_token.shape} {new_token}")
             logger.info(f"Decoded response: {response}")
