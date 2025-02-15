@@ -5,7 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import GPUtil
 import psutil
@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, field_validator
-from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 
@@ -29,8 +29,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global variables
-vl_gpt = None
-vl_chat_processor = None
+vl_gpt: MultiModalityCausalLM = None
+vl_chat_processor: VLChatProcessor = None
 tokenizer = None
 cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -175,7 +175,7 @@ def initialize_model():
             vl_gpt = AutoModelForCausalLM.from_pretrained(
                 model_path, language_config=language_config, trust_remote_code=True
             )
-            vl_gpt = vl_gpt.to(torch.bfloat16).cuda()
+            vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
 
             vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
             tokenizer = vl_chat_processor.tokenizer
@@ -281,13 +281,17 @@ async def chat_completions(request: ChatCompletionRequest):
             cuda_device,
             dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16,
         )
-
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**inputs)
 
         if request.stream:
-            return StreamingResponse(generate_stream(inputs, inputs_embeds, request), media_type="text/event-stream")
+            return StreamingResponse(
+                generate_stream(inputs, inputs_embeds, request),
+                media_type="text/event-stream",
+            )
 
-        response, generated_ids_trimmed = generate_response(inputs, inputs_embeds, request)
+        response, generated_ids_trimmed = generate_response(
+            inputs, inputs_embeds, request
+        )
 
         total_time = time.time() - request_start_time
         logger.info(f"Request completed in {total_time:.2f} seconds")
@@ -334,7 +338,9 @@ async def health_check():
     }
 
 
-def process_messages(messages: List[ChatMessage]) -> Tuple[List[Dict[str, Any]], List[Image.Image]]:
+def process_messages(
+    messages: List[ChatMessage],
+) -> Tuple[List[Dict[str, Any]], List[Image.Image]]:
     """Process chat messages and extract conversation and images"""
     conversation = []
     images = []
@@ -362,7 +368,9 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
     """Generate response stream for chat completion"""
     generated_ids = []
     past_key_values = None
-    for i in range(request.max_tokens):
+    i = 0
+    while i < request.max_tokens:
+        max_new = min(512, request.max_tokens - i)
         if i == 0:
             outputs = vl_gpt.language_model.generate(
                 inputs_embeds=inputs_embeds,
@@ -370,7 +378,7 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
                 pad_token_id=tokenizer.eos_token_id,
                 bos_token_id=tokenizer.bos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                max_new_tokens=1,
+                max_new_tokens=max_new,
                 do_sample=False if request.temperature == 0 else True,
                 use_cache=True,
                 temperature=request.temperature,
@@ -383,7 +391,7 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
                 pad_token_id=tokenizer.eos_token_id,
                 bos_token_id=tokenizer.bos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                max_new_tokens=1,
+                max_new_tokens=max_new,
                 do_sample=False if request.temperature == 0 else True,
                 use_cache=True,
                 temperature=request.temperature,
@@ -391,58 +399,56 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
                 past_key_values=past_key_values,
             )
 
-        if hasattr(outputs, 'past_key_values'):
+        if hasattr(outputs, "past_key_values"):
             past_key_values = outputs.past_key_values
-            new_token = outputs[0][-1].unsqueeze(0)
+            new_tokens = outputs[0][-max_new:]
         else:
-            new_token = outputs[-1].unsqueeze(0)
+            new_tokens = outputs[-max_new:]
 
-        generated_ids.append(new_token)
-        if len(generated_ids) == 1:
-            response = tokenizer.decode(
-                generated_ids[0].cpu().tolist()[0],
-                skip_special_tokens=True,
-            )
-        else:
+        for new_token in new_tokens:
+            new_token = new_token.unsqueeze(0)
+            generated_ids.append(new_token)
             response = tokenizer.decode(
                 torch.cat(generated_ids, dim=0).cpu().tolist()[0],
                 skip_special_tokens=True,
             )
+            
+            # 调试信息
+            logger.info(f"Generated token: {new_token.item()}")
+            logger.info(f"Decoded response: {response}")
 
-        if (
-            request.response_format
-            and request.response_format.get("type") == "json_object"
-        ):
-            try:
-                if response.startswith("```"):
-                    response = "\n".join(response.split("\n")[1:-1])
-                if response.startswith("json"):
-                    response = response[4:].lstrip()
-                content = json.loads(response)
-                response = json.dumps(content)
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON parsing error: {str(e)}")
-                raise HTTPException(
-                    status_code=400, detail=f"Invalid JSON response: {str(e)}"
-                )
+            if (
+                request.response_format
+                and request.response_format.get("type") == "json_object"
+            ):
+                try:
+                    if response.startswith("```"):
+                        response = "\n".join(response.split("\n")[1:-1])
+                    if response.startswith("json"):
+                        response = response[4:].lstrip()
+                    content = json.loads(response)
+                    response = json.dumps(content)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parsing error: {str(e)}")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid JSON response: {str(e)}"
+                    )
 
-        event = {
-            "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            "object": "chat.completion.chunk",
-            "created": int(datetime.now().timestamp()),
-            "model": request.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": response},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        yield f"data: {json.dumps(event)}\n\n"
+            event = {
+                "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "object": "chat.completion.chunk",
+                "created": int(datetime.now().timestamp()),
+                "model": request.model,
+                "choices": [
+                    {"index": 0, "delta": {"content": response}, "finish_reason": None}
+                ],
+            }
+            yield f"data: {json.dumps(event)}\n\n"
 
-        if new_token.item() == tokenizer.eos_token_id:
-            break
+            if new_token.item() == tokenizer.eos_token_id:
+                break
+
+        i += max_new
 
     # 发送结束事件
     event = {
@@ -455,7 +461,9 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
     yield f"data: {json.dumps(event)}\n\n"
 
 
-def generate_response(inputs, inputs_embeds, request: ChatCompletionRequest) -> Tuple[str, List[torch.Tensor]]:
+def generate_response(
+    inputs, inputs_embeds, request: ChatCompletionRequest
+) -> Tuple[str, List[torch.Tensor]]:
     """Generate response for chat completion"""
     generated_ids = vl_gpt.language_model.generate(
         inputs_embeds=inputs_embeds,
@@ -479,10 +487,7 @@ def generate_response(inputs, inputs_embeds, request: ChatCompletionRequest) -> 
         generated_ids[0].cpu().tolist(), skip_special_tokens=True
     )
 
-    if (
-        request.response_format
-        and request.response_format.get("type") == "json_object"
-    ):
+    if request.response_format and request.response_format.get("type") == "json_object":
         try:
             if response.startswith("```"):
                 response = "\n".join(response.split("\n")[1:-1])
