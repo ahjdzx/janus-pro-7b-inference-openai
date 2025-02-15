@@ -292,7 +292,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
         if request.stream:
             return StreamingResponse(
-                generate_stream(response),
+                generate_stream(model, response),
                 media_type="text/event-stream",
             )
 
@@ -364,7 +364,7 @@ def process_messages(
     return conversation, images
 
 
-def generate_stream(request: ChatCompletionRequest, response: str):
+def generate_stream(model: str, response: str):
     """Generate response stream for chat completion"""
     # 模拟流式输出：将 response 拆分为 token（或词），逐步发送
     tokens = response.split()  # 简单按空格拆分
@@ -373,7 +373,7 @@ def generate_stream(request: ChatCompletionRequest, response: str):
             "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "object": "chat.completion.chunk",
             "created": int(datetime.now().timestamp()),
-            "model": request.model,
+            "model": model,
             "choices": [
                 {
                     "index": 0,
@@ -391,7 +391,7 @@ def generate_stream(request: ChatCompletionRequest, response: str):
         "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         "object": "chat.completion.chunk",
         "created": int(datetime.now().timestamp()),
-        "model": request.model,
+        "model": model,
         "choices": [
             {
                 "index": 0,
