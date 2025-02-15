@@ -392,10 +392,16 @@ def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
 
         new_token = outputs[0][-1].unsqueeze(0)
         generated_ids.append(new_token)
-        response = tokenizer.decode(
-            torch.cat(generated_ids, dim=1).cpu().tolist()[0],
-            skip_special_tokens=True,
-        )
+        if len(generated_ids) == 1:
+            response = tokenizer.decode(
+                generated_ids[0].cpu().tolist()[0],
+                skip_special_tokens=True,
+            )
+        else:
+            response = tokenizer.decode(
+                torch.cat(generated_ids, dim=0).cpu().tolist()[0],
+                skip_special_tokens=True,
+            )
 
         if (
             request.response_format
