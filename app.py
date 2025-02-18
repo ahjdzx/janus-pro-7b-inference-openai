@@ -9,6 +9,7 @@ from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import GPUtil
+import numpy as np
 import psutil
 import torch
 import uvicorn
@@ -80,11 +81,12 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    temperature: Optional[float] = 0.7
+    temperature: Optional[float] = 0.1
     top_p: Optional[float] = 0.95
     max_tokens: Optional[int] = 2048
     stream: Optional[bool] = False
     response_format: Optional[Dict[str, str]] = None
+    seed: Optional[int] = 42
 
 
 class ChatCompletionResponse(BaseModel):
@@ -264,7 +266,13 @@ async def list_models():
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@torch.inference_mode()
 async def chat_completions(request: ChatCompletionRequest):
+    torch.cuda.empty_cache()
+    torch.manual_seed(request.seed)
+    np.random.seed(request.seed)
+    torch.cuda.manual_seed(request.seed)
+
     """Handle chat completion requests with vision support"""
     try:
         request_start_time = time.time()
