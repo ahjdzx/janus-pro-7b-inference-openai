@@ -5,6 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from threading import Thread
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import GPUtil
@@ -16,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, field_validator
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, TextIteratorStreamer
 
 from janus.models import MultiModalityCausalLM, VLChatProcessor
 
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 # Global variables
 vl_gpt: MultiModalityCausalLM = None
 vl_chat_processor: VLChatProcessor = None
-tokenizer = None
 cuda_device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -162,7 +162,7 @@ def log_system_info():
 
 def initialize_model():
     """Initialize the model and processor"""
-    global vl_gpt, vl_chat_processor, tokenizer
+    global vl_gpt, vl_chat_processor
     if vl_gpt is None or vl_chat_processor is None:
         try:
             start_time = time.time()
@@ -178,7 +178,7 @@ def initialize_model():
             vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
 
             vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
-            tokenizer = vl_chat_processor.tokenizer
+            # tokenizer = vl_chat_processor.tokenizer
 
             end_time = time.time()
             logger.info(f"Model initialized in {end_time - start_time:.2f} seconds")
@@ -197,7 +197,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Shutting down application...")
-        global vl_gpt, vl_chat_processor, tokenizer
+        global vl_gpt, vl_chat_processor
         if vl_gpt is not None:
             try:
                 del vl_gpt
@@ -283,6 +283,12 @@ async def chat_completions(request: ChatCompletionRequest):
         )
         inputs_embeds = vl_gpt.prepare_inputs_embeds(**inputs)
 
+        if request.stream:
+            return StreamingResponse(
+                generate_stream2(inputs, inputs_embeds, response),
+                media_type="text/event-stream",
+            )
+
         response, generated_ids_trimmed = generate_response(
             inputs, inputs_embeds, request
         )
@@ -320,6 +326,73 @@ async def chat_completions(request: ChatCompletionRequest):
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def generate_stream2(inputs, inputs_embeds, request: ChatCompletionRequest):
+    # Prepare streamer
+    streamer = TextIteratorStreamer(
+        vl_chat_processor.tokenizer, skip_prompt=True, skip_special_tokens=True
+    )
+
+    # Generation parameters
+    generation_kwargs = dict(
+        inputs_embeds=inputs_embeds,
+        attention_mask=inputs.attention_mask,
+        pad_token_id=vl_chat_processor.tokenizer.eos_token_id,
+        bos_token_id=vl_chat_processor.tokenizer.bos_token_id,
+        eos_token_id=vl_chat_processor.tokenizer.eos_token_id,
+        max_new_tokens=request.max_tokens,
+        do_sample=False if request.temperature == 0 else True,
+        use_cache=True,
+        temperature=request.temperature,
+        top_p=request.top_p,
+    )
+
+    # Start generation in background thread
+    thread = Thread(target=vl_gpt.language_model.generate, kwargs=generation_kwargs)
+    thread.start()
+
+    # OpenAI-compatible response format
+    def event_generator():
+        # Stream tokens
+        for token in streamer:
+            chunk = json.dumps(
+                {
+                    "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    "object": "chat.completion.chunk",
+                    "created": int(datetime.now().timestamp()),
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": token + " "},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+            # 每个数据块前加上 "data: " 并以 "\n\n" 结尾，符合 SSE 格式
+            yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+
+        # 发送结束事件
+        chunk = {
+            "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "object": "chat.completion.chunk",
+            "created": int(datetime.now().timestamp()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
+        # 最后发送 DONE 信号
+        yield "data: [DONE]\n\n"
+
+    return event_generator()
 
 
 @app.get("/health")
@@ -412,9 +485,9 @@ def generate_response(
     generated_ids = vl_gpt.language_model.generate(
         inputs_embeds=inputs_embeds,
         attention_mask=inputs.attention_mask,
-        pad_token_id=tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=vl_chat_processor.tokenizer.eos_token_id,
+        bos_token_id=vl_chat_processor.tokenizer.bos_token_id,
+        eos_token_id=vl_chat_processor.tokenizer.eos_token_id,
         max_new_tokens=request.max_tokens,
         do_sample=False if request.temperature == 0 else True,
         use_cache=True,
@@ -427,7 +500,7 @@ def generate_response(
         for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
 
-    response = tokenizer.decode(
+    response = vl_chat_processor.tokenizer.decode(
         generated_ids[0].cpu().tolist(), skip_special_tokens=True
     )
 
