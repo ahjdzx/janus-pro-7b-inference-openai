@@ -285,7 +285,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
         if request.stream:
             return StreamingResponse(
-                generate_stream2(inputs, inputs_embeds, response),
+                generate_stream2(inputs, inputs_embeds, request),
                 media_type="text/event-stream",
             )
 
@@ -338,10 +338,11 @@ def generate_stream2(inputs, inputs_embeds, request: ChatCompletionRequest):
     generation_kwargs = dict(
         inputs_embeds=inputs_embeds,
         attention_mask=inputs.attention_mask,
+        streamer=streamer,
+        max_new_tokens=request.max_tokens,
         pad_token_id=vl_chat_processor.tokenizer.eos_token_id,
         bos_token_id=vl_chat_processor.tokenizer.bos_token_id,
         eos_token_id=vl_chat_processor.tokenizer.eos_token_id,
-        max_new_tokens=request.max_tokens,
         do_sample=False if request.temperature == 0 else True,
         use_cache=True,
         temperature=request.temperature,
@@ -356,21 +357,19 @@ def generate_stream2(inputs, inputs_embeds, request: ChatCompletionRequest):
     def event_generator():
         # Stream tokens
         for token in streamer:
-            chunk = json.dumps(
-                {
-                    "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                    "object": "chat.completion.chunk",
-                    "created": int(datetime.now().timestamp()),
-                    "model": request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": token + " "},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            )
+            chunk = {
+                "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "object": "chat.completion.chunk",
+                "created": int(datetime.now().timestamp()),
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": token},
+                        "finish_reason": None,
+                    }
+                ],
+            }
             # 每个数据块前加上 "data: " 并以 "\n\n" 结尾，符合 SSE 格式
             yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
 
