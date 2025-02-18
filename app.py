@@ -285,7 +285,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
         if request.stream:
             return StreamingResponse(
-                generate_stream2(inputs, inputs_embeds, request),
+                generate_stream(inputs, inputs_embeds, request),
                 media_type="text/event-stream",
             )
 
@@ -295,12 +295,6 @@ async def chat_completions(request: ChatCompletionRequest):
 
         total_time = time.time() - request_start_time
         logger.info(f"Request completed in {total_time:.2f} seconds")
-
-        if request.stream:
-            return StreamingResponse(
-                generate_stream(request.model, response),
-                media_type="text/event-stream",
-            )
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -328,7 +322,7 @@ async def chat_completions(request: ChatCompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def generate_stream2(inputs, inputs_embeds, request: ChatCompletionRequest):
+def generate_stream(inputs, inputs_embeds, request: ChatCompletionRequest):
     # Prepare streamer
     streamer = TextIteratorStreamer(
         vl_chat_processor.tokenizer, skip_prompt=True, skip_special_tokens=True
@@ -416,9 +410,11 @@ def process_messages(
     """Process chat messages and extract conversation and images"""
     conversation = []
     images = []
+
     for msg in messages:
         if isinstance(msg.content, str):
-            conversation.append({"role": msg.role, "content": msg.content})
+            if msg.role == "assistant":
+                conversation.append({"role": "<|Assistant|>", "content": msg.content})
         else:
             processed_content = ""
             for content_item in msg.content:
@@ -431,50 +427,9 @@ def process_messages(
                                 process_base64_image(content_item.image_url["url"])
                             )
             conversation.append(
-                {"role": "User", "content": processed_content, "images": images}
+                {"role": "<|User|>", "content": processed_content, "images": images}
             )
     return conversation, images
-
-
-def generate_stream(model: str, response: str):
-    """Generate response stream for chat completion"""
-    # 模拟流式输出：将 response 拆分为 token（或词），逐步发送
-    tokens = response.split()  # 简单按空格拆分
-    for token in tokens:
-        chunk = {
-            "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            "object": "chat.completion.chunk",
-            "created": int(datetime.now().timestamp()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": token + " "},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        # 每个数据块前加上 "data: " 并以 "\n\n" 结尾，符合 SSE 格式
-        yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
-        # time.sleep(0.01)  # 模拟延迟，可根据需要调整
-
-    # 发送结束事件
-    chunk = {
-        "id": f"chatcmpl-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        "object": "chat.completion.chunk",
-        "created": int(datetime.now().timestamp()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": ""},
-                "finish_reason": "stop",
-            }
-        ],
-    }
-    yield "data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n"
-    # 最后发送 DONE 信号
-    yield "data: [DONE]\n\n"
 
 
 def generate_response(
