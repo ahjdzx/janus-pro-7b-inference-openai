@@ -268,12 +268,12 @@ async def chat_completions(request: ChatCompletionRequest):
     """Handle chat completion requests with vision support"""
     try:
         request_start_time = time.time()
-        logger.info(f"Received chat completion request for model: {request.model}")
-        logger.info(f"Request content: {request.model_dump_json()}")
+        # logger.info(f"Received chat completion request for model: {request.model}")
+        # logger.info(f"Request content: {request.model_dump_json()}")
 
         conversation, images = process_messages(request.messages)
 
-        logger.info(f"conversation: {conversation}")
+        # logger.info(f"conversation: {conversation}")
 
         inputs = vl_chat_processor(
             conversations=conversation, images=images, force_batchify=True
