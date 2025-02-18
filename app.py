@@ -411,24 +411,25 @@ def process_messages(
     conversation = []
     images = []
 
-    for msg in messages:
-        if isinstance(msg.content, str):
-            if msg.role == "assistant":
-                conversation.append({"role": "<|Assistant|>", "content": msg.content})
-        else:
-            processed_content = ""
-            for content_item in msg.content:
-                if content_item.type == "text":
-                    processed_content = f"<image_placeholder>\n{content_item.text}"
-                elif content_item.type == "image_url":
-                    if "url" in content_item.image_url:
-                        if content_item.image_url["url"].startswith("data:image"):
-                            images.append(
-                                process_base64_image(content_item.image_url["url"])
-                            )
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        processed_content = ""
+        for content_item in msg.content:
+            if content_item.type == "text":
+                processed_content = f"<image_placeholder>\n{content_item.text}"
+            elif content_item.type == "image_url":
+                if "url" in content_item.image_url:
+                    if content_item.image_url["url"].startswith("data:image"):
+                        images.append(
+                            process_base64_image(content_item.image_url["url"])
+                        )
+        if len(processed_content) > 0 and len(images) > 0:
             conversation.append(
                 {"role": "<|User|>", "content": processed_content, "images": images}
             )
+            conversation.append({"role": "<|Assistant|>", "content": ""})
+            break
+
     return conversation, images
 
 
