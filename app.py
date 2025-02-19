@@ -421,12 +421,12 @@ def process_messages(
 
     has_assistant = False
     for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
         if isinstance(msg.content, str):
             if msg.role == "assistant":
                 conversation.append({"role": "<|Assistant|>", "content": msg.content})
                 has_assistant = True
         else:
-            msg = messages[i]
             processed_content = ""
             for content_item in msg.content:
                 if content_item.type == "text":
