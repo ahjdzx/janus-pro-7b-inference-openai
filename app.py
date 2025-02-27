@@ -267,7 +267,7 @@ async def list_models():
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 @torch.inference_mode()
-async def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest):
     torch.cuda.empty_cache()
     torch.manual_seed(request.seed)
     np.random.seed(request.seed)
